@@ -831,6 +831,14 @@ p { text-wrap: pretty; }
   color: var(--text);
 }
 
+.panel-kicker {
+  margin: 0.18rem 0 0;
+  color: var(--text-faint);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
 .panel-badge {
   font-size: 0.625rem;
   font-weight: 700;
@@ -1433,7 +1441,7 @@ p { text-wrap: pretty; }
 
 .time-label,
 .hour-slot {
-  height: 48px;
+  height: 52px;
 }
 
 .meeting-planner {
@@ -1791,7 +1799,8 @@ p { text-wrap: pretty; }
   --dash-accent: oklch(0.56 0.19 258);
   --dash-accent-soft: oklch(0.95 0.04 258);
   --dash-shadow: 0 16px 44px oklch(0.37 0.04 255 / 0.08), 0 2px 10px oklch(0.37 0.04 255 / 0.06);
-  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 0.75rem 0 5.25rem;
   background:
     radial-gradient(90rem 55rem at 110% -10%, oklch(0.93 0.045 250) 0%, transparent 52%),
     radial-gradient(72rem 52rem at -15% -20%, oklch(0.95 0.032 240) 0%, transparent 48%),
@@ -1804,7 +1813,7 @@ p { text-wrap: pretty; }
   top: 1rem;
   z-index: 20;
   max-width: 1320px;
-  margin: 1rem auto 0;
+  margin: 0 auto;
   padding: 0.7rem 0.9rem;
   border-radius: 16px;
   border: 1px solid var(--dash-border);
@@ -1862,7 +1871,7 @@ p { text-wrap: pretty; }
 
 .dashboard-body-calendar {
   width: min(1320px, calc(100vw - 2rem));
-  margin: 1rem auto 0;
+  margin: 0.85rem auto 0;
   padding: 0;
 }
 
@@ -1875,7 +1884,7 @@ p { text-wrap: pretty; }
 }
 
 .calendar-toolbar {
-  padding: 1rem 1.1rem;
+  padding: 0.95rem 1rem;
   border-bottom: 1px solid var(--dash-border);
   background: linear-gradient(180deg, oklch(0.99 0.005 252), oklch(0.975 0.01 252));
 }
@@ -1893,7 +1902,7 @@ p { text-wrap: pretty; }
 .dashboard-tools {
   grid-template-columns: 22rem minmax(0, 1fr);
   gap: 1rem;
-  padding: 1rem;
+  padding: 0.85rem 1rem;
   background: oklch(0.982 0.006 252);
   border-bottom: 1px solid var(--dash-border);
 }
@@ -2225,11 +2234,11 @@ p { text-wrap: pretty; }
 
 /* ─── FLOATING ASK AI BAR + PANEL ───────────────────────────── */
 .chat-search-launch {
-  position: fixed;
+  position: fixed !important;
   left: 50%;
-  bottom: 1.1rem;
+  bottom: max(1.1rem, env(safe-area-inset-bottom));
   transform: translateX(-50%);
-  z-index: 50;
+  z-index: 80;
   width: min(680px, calc(100vw - 2rem));
   height: 54px;
   display: inline-flex;
@@ -2256,6 +2265,7 @@ p { text-wrap: pretty; }
 .chat-search-launch.open {
   opacity: 0.2;
   pointer-events: none;
+  transform: translateX(-50%);
 }
 
 .chat-search-icon {
@@ -2663,14 +2673,15 @@ body {
 }
 
 .calendar-board {
-  height: min(62vh, 860px);
-  min-height: 420px;
+  height: auto;
+  min-height: 0;
 }
 
 .calendar-grid-shell {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   width: 100%;
   min-width: 0;
+  max-height: min(64dvh, 720px);
   overflow: auto;
   overscroll-behavior: contain;
 }
@@ -2679,12 +2690,10 @@ body {
   from {
     opacity: 0;
     filter: blur(10px);
-    transform: translateY(14px);
   }
   to {
     opacity: 1;
     filter: blur(0);
-    transform: translateY(0);
   }
 }
 
@@ -2768,7 +2777,7 @@ body {
 @media (max-width: 860px) {
   .chat-search-launch {
     width: calc(100vw - 1rem);
-    bottom: 0.6rem;
+    bottom: max(0.6rem, env(safe-area-inset-bottom));
     font-size: 0.82rem;
     height: 50px;
   }

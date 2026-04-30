@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
+import { createPortal } from "react-dom";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import { Calendar } from "@/components/ui/calendar";
@@ -194,6 +195,33 @@ const STARTER_PROMPTS = [
   "How much time am I in meetings?",
   "Draft a scheduling email to the team.",
 ];
+type CancelScope = "today" | "all";
+const CANCEL_ALL_CONFIRMATION = "CONFIRM CANCEL ALL MEETINGS";
+const CANCEL_TODAY_CONFIRMATION = "CONFIRM CANCEL TODAY'S MEETINGS";
+
+function isCancelMeetingsRequest(content: string) {
+  const normalized = content.toLowerCase();
+  return (
+    normalized.includes("cancel") &&
+    (normalized.includes("meeting") || normalized.includes("meetings") || normalized.includes("events"))
+  );
+}
+
+function getCancelScope(content: string): CancelScope | null {
+  if (!isCancelMeetingsRequest(content)) return null;
+  const normalized = content.toLowerCase();
+  if (
+    normalized.includes("today") ||
+    normalized.includes("tonight") ||
+    normalized.includes("this morning") ||
+    normalized.includes("this afternoon") ||
+    normalized.includes("this evening")
+  ) {
+    return "today";
+  }
+  if (normalized.includes("all")) return "all";
+  return null;
+}
 
 export default function Dashboard() {
   const router = useRouter();
@@ -210,6 +238,13 @@ export default function Dashboard() {
   const [, setStatus] = useState("Checking session…");
   const [isChatting, setIsChatting] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isCancellingAllMeetings, setIsCancellingAllMeetings] = useState(false);
+  const [cancelPendingScope, setCancelPendingScope] = useState<CancelScope | null>(null);
+  const isOverlayMounted = useSyncExternalStore(
+    () => () => undefined,
+    () => true,
+    () => false,
+  );
   const [meetingTitle, setMeetingTitle] = useState("Team sync");
   const [meetingDurationMin, setMeetingDurationMin] = useState(30);
   const [meetingAttendees, setMeetingAttendees] = useState("");
@@ -276,12 +311,31 @@ export default function Dashboard() {
     }),
     [calendarDays.length, timeRange]
   );
-  const HOUR_START = 6;
-  const HOUR_END = 22;
-  const HOUR_HEIGHT = 48;
+  const calendarWindow = useMemo(() => {
+    const visibleEvents = dayEvents.flat();
+    if (visibleEvents.length === 0) return { start: 8, end: 18 };
+
+    const earliestHour = Math.min(
+      ...visibleEvents.map((event) => new Date(event.starts_at).getHours()),
+    );
+    const latestHour = Math.max(
+      ...visibleEvents.map((event) => {
+        const end = new Date(event.ends_at);
+        return end.getHours() + (end.getMinutes() > 0 ? 1 : 0);
+      }),
+    );
+
+    return {
+      start: Math.max(0, Math.min(8, earliestHour - 1)),
+      end: Math.min(23, Math.max(18, latestHour + 1)),
+    };
+  }, [dayEvents]);
+  const HOUR_START = calendarWindow.start;
+  const HOUR_END = calendarWindow.end;
+  const HOUR_HEIGHT = 52;
   const hours = useMemo(
     () => Array.from({ length: HOUR_END - HOUR_START + 1 }, (_, i) => HOUR_START + i),
-    []
+    [HOUR_END, HOUR_START]
   );
 
   // Auth
@@ -394,6 +448,34 @@ export default function Dashboard() {
     const next: ChatMessage[] = [...messages, { role: "user", content: trimmed }];
     setMessages(next);
     setInput("");
+
+    if (trimmed === CANCEL_ALL_CONFIRMATION && cancelPendingScope === "all") {
+      await cancelMeetings(next, "all");
+      return;
+    }
+
+    if (trimmed === CANCEL_TODAY_CONFIRMATION && cancelPendingScope === "today") {
+      await cancelMeetings(next, "today");
+      return;
+    }
+
+    const cancelScope = getCancelScope(trimmed);
+    if (cancelScope) {
+      setCancelPendingScope(cancelScope);
+      const confirmation = cancelScope === "today" ? CANCEL_TODAY_CONFIRMATION : CANCEL_ALL_CONFIRMATION;
+      const scopeText = cancelScope === "today"
+        ? "every synced meeting scheduled for today only"
+        : "every upcoming synced meeting";
+      setMessages(cur => [
+        ...cur,
+        {
+          role: "assistant",
+          content: `I can cancel ${scopeText} in Google Calendar. This will send cancellation updates to attendees where Google allows it.\n\nTo continue, type exactly: **${confirmation}**`,
+        },
+      ]);
+      return;
+    }
+
     setIsChatting(true);
 
     const res = await fetch("/api/chat", {
@@ -409,6 +491,73 @@ export default function Dashboard() {
       { role: "assistant", content: res.ok ? data.reply : (data.error ?? "The agent couldn't respond.") },
     ]);
     setIsChatting(false);
+  }
+
+  async function cancelMeetings(nextMessages: ChatMessage[], scope: CancelScope) {
+    if (!session?.access_token || !session.provider_token || isCancellingAllMeetings) return;
+
+    setIsCancellingAllMeetings(true);
+    setIsChatting(true);
+
+    try {
+      const todayStart = startOfDay(new Date());
+      const tomorrowStart = new Date(todayStart);
+      tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+
+      const res = await fetch("/api/calendar/cancel-all", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          googleAccessToken: session.provider_token,
+          confirm: scope === "today" ? CANCEL_TODAY_CONFIRMATION : CANCEL_ALL_CONFIRMATION,
+          scope,
+          startsAt: scope === "today" ? todayStart.toISOString() : undefined,
+          endsAt: scope === "today" ? tomorrowStart.toISOString() : undefined,
+        }),
+      });
+      const data = await res.json();
+
+      if (res.ok) {
+        await loadEvents(session.access_token);
+        setCancelPendingScope(null);
+        const failedLine = data.failed
+          ? ` ${data.failed} could not be cancelled.`
+          : "";
+        const scopeLabel = scope === "today" ? "today's synced meeting" : "upcoming synced meeting";
+        setMessages([
+          ...nextMessages,
+          {
+            role: "assistant",
+            content: `Cancelled ${data.cancelled} ${scopeLabel}${data.cancelled === 1 ? "" : "s"}.${failedLine}`,
+          },
+        ]);
+      } else {
+        setMessages([
+          ...nextMessages,
+          {
+            role: "assistant",
+            content: data.error ?? "Could not cancel the meetings.",
+          },
+        ]);
+        if (data.needsReconnect) {
+          setStatus("Google write scope is missing — sign out and reconnect Google.");
+        }
+      }
+    } catch {
+      setMessages([
+        ...nextMessages,
+        {
+          role: "assistant",
+          content: "Could not reach the calendar cancellation service. Please try again.",
+        },
+      ]);
+    } finally {
+      setIsChatting(false);
+      setIsCancellingAllMeetings(false);
+    }
   }
 
   function generateSuggestedSlots(durationMinutes: number) {
@@ -648,7 +797,7 @@ export default function Dashboard() {
         <section className="calendar-panel">
           <div className="calendar-toolbar">
             <div className="calendar-toolbar-left">
-              <h2 className="calendar-title">Your upcoming meeting</h2>
+              <h2 className="calendar-title">Your schedule</h2>
               <span className="panel-badge">{rangeEventCount} events in {rangeLabel.toLowerCase()}</span>
             </div>
             <div className="calendar-summary">
@@ -793,26 +942,31 @@ export default function Dashboard() {
         </section>
       </div>
 
-      <button
-        className={`chat-search-launch${isChatOpen ? " open" : ""}`}
-        type="button"
-        onClick={() => setIsChatOpen(true)}
-        aria-label="Open Ask AI"
-      >
-        <span className="chat-search-icon" aria-hidden="true">✦</span>
-        <span>{isChatting ? "Thinking..." : "Want to know more about your schedule?"}</span>
-      </button>
+      {isOverlayMounted ? createPortal(
+        <>
+          <button
+            className={`chat-search-launch${isChatOpen ? " open" : ""}`}
+            type="button"
+            onClick={() => setIsChatOpen(true)}
+            aria-label="Open Ask AI"
+          >
+            <span className="chat-search-icon" aria-hidden="true">✦</span>
+            <span>{isChatting ? "Thinking..." : "Want to know more about your schedule?"}</span>
+          </button>
 
-      <button
-        className={`chat-float-backdrop${isChatOpen ? " open" : ""}`}
-        type="button"
-        aria-label="Close Ask AI"
-        onClick={() => setIsChatOpen(false)}
-      />
+          <button
+            className={`chat-float-backdrop${isChatOpen ? " open" : ""}`}
+            type="button"
+            aria-label="Close Ask AI"
+            onClick={() => setIsChatOpen(false)}
+          />
 
-      <section className={`chat-float-panel${isChatOpen ? " open" : ""}`} aria-hidden={!isChatOpen}>
+          <section className={`chat-float-panel${isChatOpen ? " open" : ""}`} aria-hidden={!isChatOpen}>
         <div className="panel-head">
-          <h2 className="panel-title">Ask AI</h2>
+          <div>
+            <h2 className="panel-title">Ask AI</h2>
+            <p className="panel-kicker">Grounded in your synced calendar</p>
+          </div>
           <div className="chat-head-actions">
             <button
               className="btn-ghost chat-close-btn"
@@ -906,7 +1060,10 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
-      </section>
+          </section>
+        </>,
+        document.body,
+      ) : null}
     </div>
   );
 }
