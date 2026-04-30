@@ -8,6 +8,8 @@ type CreateBody = {
   startsAt?: string;
   endsAt?: string;
   attendeeEmails?: string[];
+  createMeetLink?: boolean;
+  sendUpdates?: boolean;
 };
 
 function isValidIso(value?: string) {
@@ -62,9 +64,23 @@ export async function POST(request: Request) {
     attendees: (body.attendeeEmails ?? [])
       .filter(Boolean)
       .map((email) => ({ email })),
+    ...(body.createMeetLink
+      ? {
+          conferenceData: {
+            createRequest: {
+              requestId: `sched-${user.id}-${Date.now()}`,
+              conferenceSolutionKey: { type: "hangoutsMeet" },
+            },
+          },
+        }
+      : {}),
   };
 
-  const googleResponse = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+  const calendarUrl = new URL("https://www.googleapis.com/calendar/v3/calendars/primary/events");
+  if (body.createMeetLink) calendarUrl.searchParams.set("conferenceDataVersion", "1");
+  if (body.sendUpdates) calendarUrl.searchParams.set("sendUpdates", "all");
+
+  const googleResponse = await fetch(calendarUrl, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${body.googleAccessToken}`,
@@ -98,9 +114,13 @@ export async function POST(request: Request) {
     description?: string;
     location?: string;
     htmlLink?: string;
+    hangoutLink?: string;
     status?: string;
     organizer?: { email?: string };
     attendees?: Array<{ email?: string }>;
+    conferenceData?: {
+      entryPoints?: Array<{ entryPointType?: string; uri?: string }>;
+    };
     start?: { dateTime?: string; date?: string };
     end?: { dateTime?: string; date?: string };
   };
@@ -127,5 +147,15 @@ export async function POST(request: Request) {
     );
   }
 
-  return Response.json({ ok: true, eventId: created.id, htmlLink: created.htmlLink ?? null });
+  const meetLink =
+    created.hangoutLink ??
+    created.conferenceData?.entryPoints?.find((entry) => entry.entryPointType === "video")?.uri ??
+    null;
+
+  return Response.json({
+    ok: true,
+    eventId: created.id,
+    htmlLink: created.htmlLink ?? null,
+    meetLink,
+  });
 }

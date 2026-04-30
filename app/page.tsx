@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { FloatingPathsBackground } from "@/components/ui/floating-paths";
 import { supabase } from "@/lib/supabase";
 
 function GoogleLogo() {
@@ -63,7 +64,7 @@ export default function LandingPage() {
   }
 
   return (
-    <div className="landing-page">
+    <FloatingPathsBackground className="landing-page" position={-1}>
       <div className="landing-glow-1" aria-hidden="true" />
       <div className="landing-glow-2" aria-hidden="true" />
 
@@ -87,6 +88,6 @@ export default function LandingPage() {
 
         <p className="landing-fine-print">Free to use · No credit card required</p>
       </main>
-    </div>
+    </FloatingPathsBackground>
   );
 }

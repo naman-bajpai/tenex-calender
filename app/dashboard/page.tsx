@@ -34,6 +34,8 @@ type SuggestedSlot = {
   label: string;
 };
 
+type TimeRange = "today" | "week" | "month";
+
 // ─── Helpers ────────────────────────────────────────────────────
 
 function durationMin(e: Pick<CalendarEvent, "starts_at" | "ends_at">) {
@@ -79,6 +81,12 @@ function extractEmailFields(content: string) {
   return { to, subject };
 }
 
+function extractEmailAddresses(value: string) {
+  return Array.from(
+    new Set(value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []),
+  );
+}
+
 function isDayToday(day: Date) {
   return day.toDateString() === new Date().toDateString();
 }
@@ -87,6 +95,16 @@ function startOfDay(date: Date) {
   const next = new Date(date);
   next.setHours(0, 0, 0, 0);
   return next;
+}
+
+function startOfWeek(date: Date) {
+  const next = startOfDay(date);
+  next.setDate(next.getDate() - next.getDay());
+  return next;
+}
+
+function startOfMonth(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
 }
 
 function dayKey(date: Date) {
@@ -120,6 +138,12 @@ function getWeekStats(events: CalendarEvent[]) {
 
 function initials(name: string) {
   return name.split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2);
+}
+
+function firstNameFromDisplayName(name: string) {
+  const trimmed = name.trim();
+  const base = trimmed.includes("@") ? trimmed.split("@")[0] : trimmed;
+  return base.split(/\s+/)[0] || "there";
 }
 
 // ─── Mini Calendar ──────────────────────────────────────────────
@@ -191,21 +215,34 @@ export default function Dashboard() {
   const [meetingAttendees, setMeetingAttendees] = useState("");
   const [slotSuggestions, setSlotSuggestions] = useState<SuggestedSlot[]>([]);
   const [isCreatingInvite, setIsCreatingInvite] = useState(false);
+  const [isCreatingEmailInvite, setIsCreatingEmailInvite] = useState(false);
   const [creatingSlot, setCreatingSlot] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<Date>(() => startOfDay(new Date()));
+  const [timeRange, setTimeRange] = useState<TimeRange>("week");
   const syncInFlightRef = useRef(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const calendarHeaderScrollRef = useRef<HTMLDivElement>(null);
+  const calendarGridScrollRef = useRef<HTMLDivElement>(null);
 
   const stats = useMemo(() => getWeekStats(events), [events]);
   const calendarDays = useMemo(() => {
-    const base = startOfDay(selectedDate);
-    return Array.from({ length: 3 }, (_, offset) => {
+    const base = timeRange === "today"
+      ? startOfDay(selectedDate)
+      : timeRange === "week"
+        ? startOfWeek(selectedDate)
+        : startOfMonth(selectedDate);
+    const dayCount = timeRange === "today"
+      ? 1
+      : timeRange === "week"
+        ? 7
+        : new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
+    return Array.from({ length: dayCount }, (_, offset) => {
       const day = new Date(base);
       day.setDate(base.getDate() + offset);
       return day;
     });
-  }, [selectedDate]);
+  }, [selectedDate, timeRange]);
   const dayEvents = useMemo(() => {
     return calendarDays.map(day => {
       const dayStart = startOfDay(day);
@@ -220,6 +257,25 @@ export default function Dashboard() {
         .sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
     });
   }, [calendarDays, events]);
+  const rangeEventCount = useMemo(
+    () => dayEvents.reduce((total, day) => total + day.length, 0),
+    [dayEvents]
+  );
+  const rangeMeetingHours = useMemo(
+    () => Math.round((dayEvents.flat().reduce((total, event) => total + durationMin(event), 0) / 60) * 10) / 10,
+    [dayEvents]
+  );
+  const rangeLabel = useMemo(() => {
+    if (timeRange === "today") return "Today";
+    if (timeRange === "week") return "This Week";
+    return "This Month";
+  }, [timeRange]);
+  const calendarGridStyle = useMemo(
+    () => ({
+      gridTemplateColumns: `64px repeat(${calendarDays.length}, minmax(${timeRange === "month" ? "120px" : "0px"}, 1fr))`,
+    }),
+    [calendarDays.length, timeRange]
+  );
   const HOUR_START = 6;
   const HOUR_END = 22;
   const HOUR_HEIGHT = 48;
@@ -255,6 +311,11 @@ export default function Dashboard() {
   useEffect(() => {
     if (session?.access_token) void loadEvents(session.access_token);
   }, [session?.access_token]);
+
+  useEffect(() => {
+    if (!calendarHeaderScrollRef.current || !calendarGridScrollRef.current) return;
+    calendarHeaderScrollRef.current.scrollLeft = calendarGridScrollRef.current.scrollLeft;
+  }, [timeRange, calendarDays.length]);
 
   // Scroll chat to bottom
   useEffect(() => {
@@ -350,8 +411,8 @@ export default function Dashboard() {
     setIsChatting(false);
   }
 
-  function suggestMeetingSlots() {
-    const duration = Math.max(15, Number.isFinite(meetingDurationMin) ? meetingDurationMin : 30);
+  function generateSuggestedSlots(durationMinutes: number) {
+    const duration = Math.max(15, Number.isFinite(durationMinutes) ? durationMinutes : 30);
     const now = new Date();
     const startWindow = new Date(now);
     startWindow.setMinutes(0, 0, 0);
@@ -400,7 +461,11 @@ export default function Dashboard() {
       pointer = new Date(pointer.getTime() + 30 * 60 * 1000);
     }
 
-    setSlotSuggestions(next);
+    return next;
+  }
+
+  function suggestMeetingSlots() {
+    setSlotSuggestions(generateSuggestedSlots(meetingDurationMin));
   }
 
   async function createInvite(slot: SuggestedSlot) {
@@ -424,6 +489,8 @@ export default function Dashboard() {
         startsAt: slot.startsAt,
         endsAt: slot.endsAt,
         attendeeEmails: attendees,
+        createMeetLink: true,
+        sendUpdates: true,
       }),
     });
     const data = await res.json();
@@ -439,6 +506,63 @@ export default function Dashboard() {
     }
     setIsCreatingInvite(false);
     setCreatingSlot(null);
+  }
+
+  async function createInviteFromEmail(text: string) {
+    if (!session?.access_token || !session.provider_token || isCreatingEmailInvite) return;
+
+    const { to, subject } = extractEmailFields(text);
+    const attendeeEmails = extractEmailAddresses(to || text);
+    if (attendeeEmails.length === 0) {
+      setStatus("Add a To: line with at least one attendee email before sending an invite.");
+      return;
+    }
+
+    const [slot] = generateSuggestedSlots(meetingDurationMin);
+    if (!slot) {
+      setStatus("No open meeting slot was found.");
+      return;
+    }
+
+    setIsCreatingEmailInvite(true);
+    const res = await fetch("/api/calendar/create", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        googleAccessToken: session.provider_token,
+        title: subject,
+        description: text,
+        startsAt: slot.startsAt,
+        endsAt: slot.endsAt,
+        attendeeEmails,
+        createMeetLink: true,
+        sendUpdates: true,
+      }),
+    });
+    const data = await res.json();
+
+    if (res.ok) {
+      await loadEvents(session.access_token);
+      const meetLine = data.meetLink ? `\nGoogle Meet: ${data.meetLink}` : "";
+      await navigator.clipboard.writeText(`${text.trim()}\n\nMeeting time: ${slot.label}${meetLine}`);
+      setMessages(cur => [
+        ...cur,
+        {
+          role: "assistant",
+          content: `Invite sent to ${attendeeEmails.join(", ")}.\nMeeting time: ${slot.label}${meetLine}`,
+        },
+      ]);
+      setStatus("Invite sent with Google Meet details.");
+    } else if (data.needsReconnect) {
+      setStatus("Google write scope is missing — sign out and reconnect Google.");
+    } else {
+      setStatus(data.error ?? "Could not send invite.");
+    }
+
+    setIsCreatingEmailInvite(false);
   }
 
   async function copyMessage(text: string) {
@@ -470,17 +594,53 @@ export default function Dashboard() {
   const userMeta = session?.user;
   const avatarUrl = userMeta?.user_metadata?.avatar_url as string | undefined;
   const displayName = (userMeta?.user_metadata?.full_name as string | undefined) ?? userMeta?.email ?? "User";
+  const firstName = firstNameFromDisplayName(displayName);
+  const todayLabel = new Date().toLocaleDateString([], {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
 
   return (
     <div className="dashboard-root">
       {/* ── Top Bar ── */}
       <header className="dashboard-topbar">
-        <button className="user-pill user-pill-logout" onClick={signOut} title="Log out">
-          <div className="user-avatar">
-            {avatarUrl ? <img src={avatarUrl} alt={displayName} /> : initials(displayName)}
+        <div className="dashboard-topbar-left">
+          <div className="dash-logo-mark" aria-hidden="true">CI</div>
+          <div className="dash-brand-copy">
+            <strong>Welcome {firstName}</strong>
+            <span>Today&apos;s date is {todayLabel}</span>
           </div>
-          <span className="user-name">{displayName}</span>
-        </button>
+        </div>
+
+        <div className="dashboard-range-tabs" role="tablist" aria-label="Schedule range">
+          {[
+            { key: "today", label: "Today" },
+            { key: "week", label: "This Week" },
+            { key: "month", label: "This Month" },
+          ].map((range) => (
+            <button
+              key={range.key}
+              type="button"
+              role="tab"
+              aria-selected={timeRange === range.key}
+              className={`range-tab${timeRange === range.key ? " active" : ""}`}
+              onClick={() => setTimeRange(range.key as TimeRange)}
+            >
+              {range.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="dashboard-topbar-actions">
+          <button className="user-pill user-pill-logout" onClick={signOut} title="Log out">
+            <div className="user-avatar">
+              {avatarUrl ? <img src={avatarUrl} alt={displayName} /> : initials(displayName)}
+            </div>
+            <span className="user-name">{displayName}</span>
+          </button>
+        </div>
       </header>
 
       {/* ── Body ── */}
@@ -488,12 +648,12 @@ export default function Dashboard() {
         <section className="calendar-panel">
           <div className="calendar-toolbar">
             <div className="calendar-toolbar-left">
-              <h2 className="calendar-title">Schedule</h2>
-              <span className="panel-badge">{events.length} events synced</span>
+              <h2 className="calendar-title">Your upcoming meeting</h2>
+              <span className="panel-badge">{rangeEventCount} events in {rangeLabel.toLowerCase()}</span>
             </div>
             <div className="calendar-summary">
-              <span>{stats.count} meetings this week</span>
-              <span>{stats.hours}h booked</span>
+              <span>{rangeEventCount} meetings in {rangeLabel.toLowerCase()}</span>
+              <span>{rangeMeetingHours}h booked</span>
             </div>
           </div>
 
@@ -570,17 +730,27 @@ export default function Dashboard() {
           </div>
 
           <div className="calendar-board">
-            <div className="calendar-header">
-              <div className="calendar-time-head" />
-              {calendarDays.map(day => (
-                <div className={`calendar-day-head${isDayToday(day) ? " is-today" : ""}`} key={day.toISOString()}>
-                  <small>{day.toLocaleDateString([], { weekday: "short" })}</small>
-                  <strong>{day.getDate()}</strong>
-                </div>
-              ))}
+            <div className="calendar-header-scroll" ref={calendarHeaderScrollRef}>
+              <div className="calendar-header" style={calendarGridStyle}>
+                <div className="calendar-time-head" />
+                {calendarDays.map(day => (
+                  <div className={`calendar-day-head${isDayToday(day) ? " is-today" : ""}`} key={day.toISOString()}>
+                    <small>{day.toLocaleDateString([], { weekday: "short" })}</small>
+                    <strong>{day.getDate()}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
 
-            <div className="calendar-grid-shell">
+            <div
+              className="calendar-grid-shell"
+              style={calendarGridStyle}
+              ref={calendarGridScrollRef}
+              onScroll={(event) => {
+                if (!calendarHeaderScrollRef.current) return;
+                calendarHeaderScrollRef.current.scrollLeft = event.currentTarget.scrollLeft;
+              }}
+            >
               <div className="calendar-time-rail">
                 {hours.map(hour => (
                   <div className="time-label" key={hour}>
@@ -679,7 +849,15 @@ export default function Dashboard() {
               {msg.role === "assistant" && (
                 <div className="chat-msg-actions">
                   <button className="btn-ghost" type="button" onClick={() => copyMessage(msg.content)}>Copy</button>
-                  <button className="btn-ghost" type="button" onClick={() => sendAsEmail(msg.content)}>Send email</button>
+                  <button className="btn-ghost" type="button" onClick={() => sendAsEmail(msg.content)}>Open email</button>
+                  <button
+                    className="btn-ghost"
+                    type="button"
+                    onClick={() => createInviteFromEmail(msg.content)}
+                    disabled={isCreatingEmailInvite}
+                  >
+                    {isCreatingEmailInvite ? "Sending..." : "Send invite"}
+                  </button>
                 </div>
               )}
             </div>
