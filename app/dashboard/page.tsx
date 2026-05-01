@@ -472,6 +472,7 @@ export default function Dashboard() {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
       body: JSON.stringify({
         messages: next.filter(m => m.role !== "assistant" || m.content.length < 1200),
+        userTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       }),
     });
 

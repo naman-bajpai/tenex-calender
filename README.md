@@ -38,33 +38,32 @@ Client (Next.js)
 **Key design decisions:**
 
 1. **Grounded AI** — the system prompt injects your real synced events as JSON facts. The model can only reference events that exist. Hallucinated attendees, times, and meeting titles are explicitly blocked by the prompt.
-
 2. **Structured email output** — the model wraps drafts in `[EMAIL_DRAFT]...[/EMAIL_DRAFT]` tags. The UI parses these into interactive cards with parsed To / Subject / Body fields and a direct compose path. No copy-paste.
-
 3. **Streaming** — `stream: true` on the OpenAI request, `ReadableStream` piped to the client. Tokens appear in real time instead of after a multi-second wait.
-
 4. **Rate limiting** — 20 requests per user per minute, in-memory sliding window. Comment in `lib/rate-limit.ts` marks exactly where Redis goes for multi-instance deployments.
 
 ---
 
 ## Tech Stack
 
-| Layer | Choice | Reason |
-|---|---|---|
-| Framework | Next.js 16 (App Router) | API routes + client components in one repo |
-| Auth + DB | Supabase | Google OAuth, Postgres, RLS in hours not days |
-| AI | OpenAI (streaming) | SSE streaming API, `gpt-4o-mini` by default |
-| Calendar | Google Calendar API | Read + write via `provider_token` |
-| Email | Gmail API (`gmail.send`) | Least-privilege scope, sends as the user |
-| Styling | Tailwind CSS + custom design tokens | Dark-mode first, consistent variable system |
-| Language | TypeScript (strict) | End-to-end types across API routes and components |
+
+| Layer     | Choice                              | Reason                                            |
+| --------- | ----------------------------------- | ------------------------------------------------- |
+| Framework | Next.js 16 (App Router)             | API routes + client components in one repo        |
+| Auth + DB | Supabase                            | Google OAuth, Postgres, RLS in hours not days     |
+| AI        | OpenAI (streaming)                  | SSE streaming API, `gpt-4o-mini` by default       |
+| Calendar  | Google Calendar API                 | Read + write via `provider_token`                 |
+| Email     | Gmail API (`gmail.send`)            | Least-privilege scope, sends as the user          |
+| Styling   | Tailwind CSS + custom design tokens | Dark-mode first, consistent variable system       |
+| Language  | TypeScript (strict)                 | End-to-end types across API routes and components |
+
 
 ---
 
 ## Trade-offs
 
 - **In-memory rate limiter** — works for a single server instance. Replace with Redis for horizontal scaling (the swap point is one line in `lib/rate-limit.ts`).
-- **`provider_token` expiry** — Google tokens expire after 1 hour. Currently the user re-authenticates. Production fix: store the refresh token server-side in Supabase and auto-refresh silently.
+- `**provider_token` expiry** — Google tokens expire after 1 hour. Currently the user re-authenticates. Production fix: store the refresh token server-side in Supabase and auto-refresh silently.
 - **Full calendar context in prompt** — sends up to 300 events per chat request. Scales well for individual users; for enterprise you'd embed events and do vector retrieval to pull only the semantically relevant ones.
 - **Dashboard page size** — key pieces are extracted (`EmailDraftCard`, `lib/message-parser.ts`, `lib/rate-limit.ts`) but the main dashboard component is still large. Full decomposition is the next refactor.
 
@@ -157,10 +156,10 @@ create policy "Users see own syncs" on calendar_syncs
 1. Go to [console.cloud.google.com](https://console.cloud.google.com)
 2. Enable **Google Calendar API** and **Gmail API**
 3. Under **OAuth consent screen → Scopes**, add:
-   - `https://www.googleapis.com/auth/calendar.events`
-   - `https://www.googleapis.com/auth/gmail.send`
+  - `https://www.googleapis.com/auth/calendar.events`
+  - `https://www.googleapis.com/auth/gmail.send`
 4. Register your Supabase callback URL as an authorized redirect URI:
-   `https://your-project.supabase.co/auth/v1/callback`
+  `https://your-project.supabase.co/auth/v1/callback`
 
 ### 5. Run
 
@@ -202,15 +201,18 @@ lib/
 
 ---
 
-## Video Outline
+## [Video Outline]()
 
-| Section | Time | Content |
-|---|---|---|
-| Opening | 0:00 | What I built and why |
-| Demo | 0:30 | Login → calendar → streaming chat → email draft cards → compose → send → meeting booking |
-| Why this way | 2:30 | Grounded AI, structured output, streaming — what makes it a system not a demo |
-| Architecture | 4:00 | Auth → Calendar API → Supabase → OpenAI stream → email parser → Gmail |
-| Trade-offs | 6:00 | Rate limiter, token expiry, context window, page size |
-| Business impact | 7:00 | Scheduling overhead is the real problem, not the meetings themselves |
-| Next steps | 7:45 | Refresh tokens, chat history, vector search, mobile, team view |
-| Close | 8:30 | GitHub, live link, open to questions |
+
+| [Section]()         | [Time]() | [Content]()                                                                                  |
+| ------------------- | -------- | -------------------------------------------------------------------------------------------- |
+| [Opening]()         | [0:00]() | [What I built and why]()                                                                     |
+| [Demo]()            | [0:30]() | [Login → calendar → streaming chat → email draft cards → compose → send → meeting booking]() |
+| [Why this way]()    | [2:30]() | [Grounded AI, structured output, streaming — what makes it a system not a demo]()            |
+| [Architecture]()    | [4:00]() | [Auth → Calendar API → Supabase → OpenAI stream → email parser → Gmail]()                    |
+| [Trade-offs]()      | [6:00]() | [Rate limiter, token expiry, context window, page size]()                                    |
+| [Business impact]() | [7:00]() | [Scheduling overhead is the real problem, not the meetings themselves]()                     |
+| [Next steps]()      | [7:45]() | [Refresh tokens, chat history, vector search, mobile, team view]()                           |
+| [Close]()           | [8:30]() | [GitHub, live link, open to questions]()                                                     |
+
+
