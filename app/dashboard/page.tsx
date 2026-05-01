@@ -6,6 +6,9 @@ import { createPortal } from "react-dom";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import { Calendar } from "@/components/ui/calendar";
+import { parseMessageParts } from "@/lib/message-parser";
+import { EmailDraftCard } from "@/components/dashboard/EmailDraftCard";
+import { DashboardNavbar } from "@/components/dashboard/DashboardNavbar";
 
 // ─── Types ─────────────────────────────────────────────────────
 
@@ -73,21 +76,6 @@ function renderInline(line: string) {
   });
 }
 
-function extractEmailFields(content: string) {
-  const lines = content.split("\n");
-  const toLine = lines.find((line) => line.toLowerCase().startsWith("to:"));
-  const subjectLine = lines.find((line) => line.toLowerCase().startsWith("subject:"));
-  const to = toLine?.slice(3).trim() ?? "";
-  const subject = subjectLine?.slice(8).trim() ?? "Scheduling follow-up";
-  return { to, subject };
-}
-
-function extractEmailAddresses(value: string) {
-  return Array.from(
-    new Set(value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []),
-  );
-}
-
 function isDayToday(day: Date) {
   return day.toDateString() === new Date().toDateString();
 }
@@ -106,6 +94,13 @@ function startOfWeek(date: Date) {
 
 function startOfMonth(date: Date) {
   return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function toDateInputValue(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function dayKey(date: Date) {
@@ -135,10 +130,6 @@ function getWeekStats(events: CalendarEvent[]) {
     collabHours: Math.round((collabMin / 60) * 10) / 10,
     pct: Math.round((minutes / (40 * 60)) * 100),
   };
-}
-
-function initials(name: string) {
-  return name.split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2);
 }
 
 function firstNameFromDisplayName(name: string) {
@@ -191,9 +182,9 @@ function MiniCalendar({
 // ─── Dashboard ──────────────────────────────────────────────────
 
 const STARTER_PROMPTS = [
-  "What does my week look like?",
-  "How much time am I in meetings?",
-  "Draft a scheduling email to the team.",
+  "I need to schedule meetings with Joe, Dan, and Sally — draft me an email for each.",
+  "How much of my time am I spending in meetings? How should I reduce it?",
+  "What does my week look like and where can I block focus time?",
 ];
 type CancelScope = "today" | "all";
 const CANCEL_ALL_CONFIRMATION = "CONFIRM CANCEL ALL MEETINGS";
@@ -248,12 +239,22 @@ export default function Dashboard() {
   const [meetingTitle, setMeetingTitle] = useState("Team sync");
   const [meetingDurationMin, setMeetingDurationMin] = useState(30);
   const [meetingAttendees, setMeetingAttendees] = useState("");
+  const [meetingDate, setMeetingDate] = useState(() => toDateInputValue(new Date()));
+  const [meetingAfterTime, setMeetingAfterTime] = useState("09:00");
   const [slotSuggestions, setSlotSuggestions] = useState<SuggestedSlot[]>([]);
   const [isCreatingInvite, setIsCreatingInvite] = useState(false);
-  const [isCreatingEmailInvite, setIsCreatingEmailInvite] = useState(false);
   const [creatingSlot, setCreatingSlot] = useState<string | null>(null);
+  const [slotFeedback, setSlotFeedback] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [bookingSlot, setBookingSlot] = useState<SuggestedSlot | null>(null);
+  const [bookingNote, setBookingNote] = useState("");
   const [selectedDate, setSelectedDate] = useState<Date>(() => startOfDay(new Date()));
   const [timeRange, setTimeRange] = useState<TimeRange>("week");
+  const [isComposeOpen, setIsComposeOpen] = useState(false);
+  const [emailTo, setEmailTo] = useState("");
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBody, setEmailBody] = useState("");
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [emailFeedback, setEmailFeedback] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const syncInFlightRef = useRef(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -311,25 +312,7 @@ export default function Dashboard() {
     }),
     [calendarDays.length, timeRange]
   );
-  const calendarWindow = useMemo(() => {
-    const visibleEvents = dayEvents.flat();
-    if (visibleEvents.length === 0) return { start: 8, end: 18 };
-
-    const earliestHour = Math.min(
-      ...visibleEvents.map((event) => new Date(event.starts_at).getHours()),
-    );
-    const latestHour = Math.max(
-      ...visibleEvents.map((event) => {
-        const end = new Date(event.ends_at);
-        return end.getHours() + (end.getMinutes() > 0 ? 1 : 0);
-      }),
-    );
-
-    return {
-      start: Math.max(0, Math.min(8, earliestHour - 1)),
-      end: Math.min(23, Math.max(18, latestHour + 1)),
-    };
-  }, [dayEvents]);
+  const calendarWindow = useMemo(() => ({ start: 0, end: 23 }), []);
   const HOUR_START = calendarWindow.start;
   const HOUR_END = calendarWindow.end;
   const HOUR_HEIGHT = 52;
@@ -376,6 +359,11 @@ export default function Dashboard() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
+  function selectCalendarDate(date: Date) {
+    setSelectedDate(date);
+    setMeetingDate(toDateInputValue(date));
+  }
+
   async function loadEvents(token: string) {
     const res = await fetch("/api/calendar/events", {
       headers: { Authorization: `Bearer ${token}` },
@@ -403,7 +391,8 @@ export default function Dashboard() {
       if (res.ok) {
         await loadEvents(session.access_token);
         if (!silent) {
-          setStatus(`Synced ${data.synced} events.`);
+          const deleted = Number(data.deleted ?? 0);
+          setStatus(deleted > 0 ? `Synced ${data.synced} events and removed ${deleted}.` : `Synced ${data.synced} events.`);
         }
       } else {
         setStatus(data.error ?? "Sync failed.");
@@ -427,7 +416,7 @@ export default function Dashboard() {
     void runSync();
     const intervalId = setInterval(() => {
       void runSync();
-    }, 15_000);
+    }, 10_000);
 
     return () => {
       mounted = false;
@@ -485,12 +474,40 @@ export default function Dashboard() {
         messages: next.filter(m => m.role !== "assistant" || m.content.length < 1200),
       }),
     });
-    const data = await res.json();
-    setMessages(cur => [
-      ...cur,
-      { role: "assistant", content: res.ok ? data.reply : (data.error ?? "The agent couldn't respond.") },
-    ]);
-    setIsChatting(false);
+
+    if (!res.ok || !res.body) {
+      const errData = await res.json().catch(() => ({})) as { error?: string };
+      setMessages(cur => [...cur, { role: "assistant", content: errData.error ?? "The agent couldn't respond." }]);
+      setIsChatting(false);
+      return;
+    }
+
+    setMessages(cur => [...cur, { role: "assistant", content: "" }]);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        setMessages(cur => {
+          const last = cur[cur.length - 1];
+          return [...cur.slice(0, -1), { ...last, content: last.content + chunk }];
+        });
+      }
+    } catch {
+      setMessages(cur => {
+        const last = cur[cur.length - 1];
+        if (!last.content) {
+          return [...cur.slice(0, -1), { role: "assistant", content: "The agent couldn't respond." }];
+        }
+        return cur;
+      });
+    } finally {
+      setIsChatting(false);
+    }
   }
 
   async function cancelMeetings(nextMessages: ChatMessage[], scope: CancelScope) {
@@ -560,17 +577,76 @@ export default function Dashboard() {
     }
   }
 
-  function generateSuggestedSlots(durationMinutes: number) {
+  async function sendEmail() {
+    if (!session?.access_token || isSendingEmail) return;
+    if (!session.provider_token) {
+      setEmailFeedback({ type: "err", text: "Google token missing — sign out and reconnect." });
+      return;
+    }
+    setIsSendingEmail(true);
+    setEmailFeedback(null);
+    try {
+      const res = await fetch("/api/gmail/send", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          googleAccessToken: session.provider_token,
+          to: emailTo,
+          subject: emailSubject,
+          body: emailBody,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setEmailFeedback({ type: "ok", text: "Email sent successfully." });
+        setEmailTo("");
+        setEmailSubject("");
+        setEmailBody("");
+      } else {
+        setEmailFeedback({ type: "err", text: data.error ?? "Failed to send email." });
+        if (data.needsReconnect) {
+          setStatus("Gmail scope missing — sign out and reconnect Google.");
+        }
+      }
+    } catch {
+      setEmailFeedback({ type: "err", text: "Could not reach email service. Please try again." });
+    } finally {
+      setIsSendingEmail(false);
+    }
+  }
+
+  function generateSuggestedSlots(durationMinutes: number, dateInput: string, afterTime: string) {
     const duration = Math.max(15, Number.isFinite(durationMinutes) ? durationMinutes : 30);
+    if (!dateInput) return [];
+    const [year, month, day] = dateInput.split("-").map(Number);
+    if (!year || !month || !day) return [];
+
+    const selectedDayStart = new Date(year, month - 1, day, 0, 0, 0, 0);
+    const selectedDayEnd = new Date(year, month - 1, day, 23, 59, 59, 999);
+
+    const [afterHour, afterMinute] = afterTime.split(":").map(Number);
     const now = new Date();
-    const startWindow = new Date(now);
-    startWindow.setMinutes(0, 0, 0);
-    if (startWindow.getHours() < 8) startWindow.setHours(8);
-    const endWindow = new Date(now);
-    endWindow.setDate(endWindow.getDate() + 14);
+    const startWindow = new Date(year, month - 1, day, afterHour ?? 9, afterMinute ?? 0, 0, 0);
+    const endWindow = new Date(year, month - 1, day, 23, 0, 0, 0);
+    const isToday = selectedDayStart.toDateString() === now.toDateString();
+    if (isToday && now > startWindow) {
+      const rounded = new Date(now);
+      const roundedMinutes = Math.ceil(rounded.getMinutes() / 30) * 30;
+      rounded.setMinutes(roundedMinutes, 0, 0);
+      startWindow.setTime(rounded.getTime());
+    }
+    if (startWindow >= endWindow) return [];
 
     const busy = events
-      .filter(event => event.status !== "cancelled")
+      .filter(event => {
+        if (event.status === "cancelled") return false;
+        const start = new Date(event.starts_at).getTime();
+        const end = new Date(event.ends_at).getTime();
+        return start < selectedDayEnd.getTime() && end > selectedDayStart.getTime();
+      })
       .map(event => ({
         start: new Date(event.starts_at).getTime(),
         end: new Date(event.ends_at).getTime(),
@@ -580,23 +656,9 @@ export default function Dashboard() {
     const next: SuggestedSlot[] = [];
     let pointer = new Date(startWindow);
     while (pointer < endWindow && next.length < 3) {
-      const day = pointer.getDay();
-      const isWeekend = day === 0 || day === 6;
-      if (isWeekend) {
-        pointer.setDate(pointer.getDate() + 1);
-        pointer.setHours(9, 0, 0, 0);
-        continue;
-      }
-
-      if (pointer.getHours() < 9) pointer.setHours(9, 0, 0, 0);
-      if (pointer.getHours() >= 17) {
-        pointer.setDate(pointer.getDate() + 1);
-        pointer.setHours(9, 0, 0, 0);
-        continue;
-      }
-
       const slotStart = pointer.getTime();
       const slotEnd = slotStart + duration * 60 * 1000;
+      if (slotEnd > endWindow.getTime()) break;
       const overlaps = busy.some(block => slotStart < block.end && slotEnd > block.start);
       if (!overlaps) {
         const start = new Date(slotStart);
@@ -614,11 +676,20 @@ export default function Dashboard() {
   }
 
   function suggestMeetingSlots() {
-    setSlotSuggestions(generateSuggestedSlots(meetingDurationMin));
+    const next = generateSuggestedSlots(meetingDurationMin, meetingDate, meetingAfterTime);
+    setSlotSuggestions(next);
+    if (next.length === 0) {
+      setStatus("No open slots found on that date. Try another date or shorter duration.");
+    }
   }
 
-  async function createInvite(slot: SuggestedSlot) {
-    if (!session?.access_token || !session.provider_token || isCreatingInvite) return;
+  async function createInvite(slot: SuggestedSlot, note: string) {
+    if (!session?.access_token || isCreatingInvite) return;
+    if (!session.provider_token) {
+      setSlotFeedback({ type: "err", text: "Google Calendar access expired — sign out and reconnect Google." });
+      return;
+    }
+    setSlotFeedback(null);
     setIsCreatingInvite(true);
     setCreatingSlot(slot.startsAt);
     const attendees = meetingAttendees
@@ -626,103 +697,86 @@ export default function Dashboard() {
       .map(email => email.trim())
       .filter(Boolean);
 
-    const res = await fetch("/api/calendar/create", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
-        googleAccessToken: session.provider_token,
-        title: meetingTitle.trim() || "Meeting",
-        startsAt: slot.startsAt,
-        endsAt: slot.endsAt,
-        attendeeEmails: attendees,
-        createMeetLink: true,
-        sendUpdates: true,
-      }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      setStatus("Invite created and synced.");
-      await loadEvents(session.access_token);
-    } else {
-      if (data.needsReconnect) {
-        setStatus("Google write scope is missing — sign out and reconnect Google.");
-      } else {
-        setStatus(data.error ?? "Could not create invite.");
-      }
-    }
-    setIsCreatingInvite(false);
-    setCreatingSlot(null);
-  }
-
-  async function createInviteFromEmail(text: string) {
-    if (!session?.access_token || !session.provider_token || isCreatingEmailInvite) return;
-
-    const { to, subject } = extractEmailFields(text);
-    const attendeeEmails = extractEmailAddresses(to || text);
-    if (attendeeEmails.length === 0) {
-      setStatus("Add a To: line with at least one attendee email before sending an invite.");
-      return;
-    }
-
-    const [slot] = generateSuggestedSlots(meetingDurationMin);
-    if (!slot) {
-      setStatus("No open meeting slot was found.");
-      return;
-    }
-
-    setIsCreatingEmailInvite(true);
-    const res = await fetch("/api/calendar/create", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
-        googleAccessToken: session.provider_token,
-        title: subject,
-        description: text,
-        startsAt: slot.startsAt,
-        endsAt: slot.endsAt,
-        attendeeEmails,
-        createMeetLink: true,
-        sendUpdates: true,
-      }),
-    });
-    const data = await res.json();
-
-    if (res.ok) {
-      await loadEvents(session.access_token);
-      const meetLine = data.meetLink ? `\nGoogle Meet: ${data.meetLink}` : "";
-      await navigator.clipboard.writeText(`${text.trim()}\n\nMeeting time: ${slot.label}${meetLine}`);
-      setMessages(cur => [
-        ...cur,
-        {
-          role: "assistant",
-          content: `Invite sent to ${attendeeEmails.join(", ")}.\nMeeting time: ${slot.label}${meetLine}`,
+    try {
+      const res = await fetch("/api/calendar/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
         },
-      ]);
-      setStatus("Invite sent with Google Meet details.");
-    } else if (data.needsReconnect) {
-      setStatus("Google write scope is missing — sign out and reconnect Google.");
-    } else {
-      setStatus(data.error ?? "Could not send invite.");
-    }
+        body: JSON.stringify({
+          googleAccessToken: session.provider_token,
+          title: meetingTitle.trim() || "Meeting",
+          startsAt: slot.startsAt,
+          endsAt: slot.endsAt,
+          attendeeEmails: attendees,
+          createMeetLink: true,
+          sendUpdates: true,
+        }),
+      });
+      const data = await res.json() as { ok?: boolean; meetLink?: string; needsReconnect?: boolean; error?: string };
+      if (res.ok) {
+        setSlotSuggestions([]);
+        setBookingSlot(null);
+        setBookingNote("");
+        await loadEvents(session.access_token);
 
-    setIsCreatingEmailInvite(false);
+        // Send email to each attendee if there's a note or meet link
+        const trimmedNote = note.trim();
+        if (attendees.length > 0 && (trimmedNote || data.meetLink)) {
+          const title = meetingTitle.trim() || "Meeting";
+          const emailResults = await Promise.allSettled(
+            attendees.map(to => {
+              const bodyLines = [
+                trimmedNote,
+                trimmedNote ? "" : "",
+                `Meeting: ${title}`,
+                `When: ${slot.label}`,
+                data.meetLink ? `Google Meet: ${data.meetLink}` : "",
+              ].filter((line, i) => !(i === 1 && !trimmedNote) && line !== "");
+
+              return fetch("/api/gmail/send", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${session.access_token}`,
+                },
+                body: JSON.stringify({
+                  googleAccessToken: session.provider_token,
+                  to,
+                  subject: `You're invited: ${title}`,
+                  body: bodyLines.join("\n"),
+                }),
+              });
+            })
+          );
+
+          const allSent = emailResults.every(r => r.status === "fulfilled");
+          setSlotFeedback({
+            type: "ok",
+            text: allSent
+              ? `Meeting booked and ${attendees.length === 1 ? "email" : `${attendees.length} emails`} sent.`
+              : "Meeting booked. Some emails could not be sent.",
+          });
+        } else {
+          setSlotFeedback({ type: "ok", text: "Meeting booked and synced to your calendar." });
+        }
+      } else if (data.needsReconnect) {
+        setSlotFeedback({ type: "err", text: "Google write access is missing — sign out and reconnect Google." });
+      } else {
+        setSlotFeedback({ type: "err", text: data.error ?? "Could not create invite." });
+      }
+    } catch {
+      setSlotFeedback({ type: "err", text: "Could not reach calendar service. Please try again." });
+    } finally {
+      setIsCreatingInvite(false);
+      setCreatingSlot(null);
+    }
   }
 
   async function copyMessage(text: string) {
     await navigator.clipboard.writeText(text);
     setStatus("Copied message to clipboard.");
-  }
-
-  function sendAsEmail(text: string) {
-    const { to, subject } = extractEmailFields(text);
-    const url = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`;
-    window.location.href = url;
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -754,43 +808,16 @@ export default function Dashboard() {
   return (
     <div className="dashboard-root">
       {/* ── Top Bar ── */}
-      <header className="dashboard-topbar">
-        <div className="dashboard-topbar-left">
-          <div className="dash-logo-mark" aria-hidden="true">CI</div>
-          <div className="dash-brand-copy">
-            <strong>Welcome {firstName}</strong>
-            <span>Today&apos;s date is {todayLabel}</span>
-          </div>
-        </div>
-
-        <div className="dashboard-range-tabs" role="tablist" aria-label="Schedule range">
-          {[
-            { key: "today", label: "Today" },
-            { key: "week", label: "This Week" },
-            { key: "month", label: "This Month" },
-          ].map((range) => (
-            <button
-              key={range.key}
-              type="button"
-              role="tab"
-              aria-selected={timeRange === range.key}
-              className={`range-tab${timeRange === range.key ? " active" : ""}`}
-              onClick={() => setTimeRange(range.key as TimeRange)}
-            >
-              {range.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="dashboard-topbar-actions">
-          <button className="user-pill user-pill-logout" onClick={signOut} title="Log out">
-            <div className="user-avatar">
-              {avatarUrl ? <img src={avatarUrl} alt={displayName} /> : initials(displayName)}
-            </div>
-            <span className="user-name">{displayName}</span>
-          </button>
-        </div>
-      </header>
+      <DashboardNavbar
+        firstName={firstName}
+        todayLabel={todayLabel}
+        displayName={displayName}
+        avatarUrl={avatarUrl}
+        timeRange={timeRange}
+        onTimeRangeChange={setTimeRange}
+        onCompose={() => { setIsComposeOpen(true); setEmailFeedback(null); }}
+        onSignOut={signOut}
+      />
 
       {/* ── Body ── */}
       <div className="dashboard-body dashboard-body-calendar">
@@ -808,7 +835,7 @@ export default function Dashboard() {
 
           <div className="dashboard-tools">
             <div className="dashboard-tools-left">
-              <MiniCalendar events={events} selectedDate={selectedDate} onSelectDate={setSelectedDate} />
+              <MiniCalendar events={events} selectedDate={selectedDate} onSelectDate={selectCalendarDate} />
               <div className="stat-grid">
                 <div className="stat-card">
                   <span className="stat-label">Meetings</span>
@@ -824,7 +851,10 @@ export default function Dashboard() {
             </div>
 
             <div className="meeting-planner">
-              <h3>Meeting planner</h3>
+              <div className="planner-header">
+                <h3 className="planner-title">Meeting Planner</h3>
+                <p className="planner-subtitle">Find open slots on your calendar</p>
+              </div>
               <div className="planner-fields">
                 <div className="planner-field-group">
                   <label className="planner-label">Title</label>
@@ -834,45 +864,113 @@ export default function Dashboard() {
                   <label className="planner-label">Attendees</label>
                   <input className="planner-input" value={meetingAttendees} onChange={e => setMeetingAttendees(e.target.value)} placeholder="alice@co.com, bob@co.com" />
                 </div>
+                <div className="planner-section-divider" />
+                <div className="planner-field-group">
+                  <label className="planner-label">Date &amp; after</label>
+                  <div style={{ display: "flex", gap: "0.45rem" }}>
+                    <input
+                      className="planner-input"
+                      type="date"
+                      value={meetingDate}
+                      style={{ flex: 1, width: 0 }}
+                      onChange={e => {
+                        const nextDate = e.target.value;
+                        setMeetingDate(nextDate);
+                        if (nextDate) {
+                          selectCalendarDate(startOfDay(new Date(`${nextDate}T00:00:00`)));
+                        }
+                      }}
+                    />
+                    <input
+                      className="planner-input"
+                      type="time"
+                      value={meetingAfterTime}
+                      onChange={e => setMeetingAfterTime(e.target.value)}
+                      title="Find slots starting from this time"
+                      style={{ width: "130px" }}
+                    />
+                  </div>
+                </div>
                 <div className="planner-field-group">
                   <label className="planner-label">Duration</label>
-                  <div className="planner-row">
-                    <div className="duration-picker">
-                      {[15, 30, 45, 60].map(d => (
-                        <button
-                          key={d}
-                          type="button"
-                          className={`duration-option${meetingDurationMin === d ? " active" : ""}`}
-                          onClick={() => setMeetingDurationMin(d)}
-                        >{d}m</button>
-                      ))}
-                    </div>
-                    <button className="btn-primary" type="button" onClick={suggestMeetingSlots}>
-                      Find a time
-                    </button>
+                  <div className="duration-picker">
+                    {[15, 30, 45, 60].map(d => (
+                      <button
+                        key={d}
+                        type="button"
+                        className={`duration-option${meetingDurationMin === d ? " active" : ""}`}
+                        onClick={() => setMeetingDurationMin(d)}
+                      >{d}m</button>
+                    ))}
                   </div>
                 </div>
               </div>
+              <button className="btn-find-time" type="button" onClick={suggestMeetingSlots}>
+                Find a time
+              </button>
               <div className="suggested-slots">
                 {slotSuggestions.length === 0 ? (
                   <span className="slots-empty">No suggestions yet.</span>
                 ) : (
-                  slotSuggestions.map(slot => (
-                    <div className="slot-item" key={slot.startsAt}>
-                      <div className="slot-item-meta">
-                        <div className="slot-badge">No conflicts</div>
-                        <div className="slot-time">{slot.label}</div>
+                  slotSuggestions.map(slot => {
+                    const isExpanded = bookingSlot?.startsAt === slot.startsAt;
+                    return (
+                      <div className={`slot-item${isExpanded ? " slot-item-expanded" : ""}`} key={slot.startsAt}>
+                        <div className="slot-item-top">
+                          <div className="slot-item-meta">
+                            <div className="slot-badge">No conflicts</div>
+                            <div className="slot-time">{slot.label}</div>
+                          </div>
+                          {!isExpanded && (
+                            <button
+                              className="slot-book-btn"
+                              type="button"
+                              onClick={() => { setBookingSlot(slot); setBookingNote(""); setSlotFeedback(null); }}
+                              disabled={isCreatingInvite}
+                            >
+                              Book →
+                            </button>
+                          )}
+                        </div>
+                        {isExpanded && (
+                          <div className="slot-note-expanded">
+                            <textarea
+                              className="slot-note-input"
+                              placeholder="Add a note to attendees… (optional)"
+                              value={bookingNote}
+                              onChange={e => setBookingNote(e.target.value)}
+                              rows={2}
+                              disabled={isCreatingInvite}
+                              autoFocus
+                            />
+                            <div className="slot-confirm-actions">
+                              <button
+                                className="btn-ghost"
+                                type="button"
+                                onClick={() => { setBookingSlot(null); setBookingNote(""); }}
+                                disabled={isCreatingInvite}
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                className="slot-book-btn"
+                                type="button"
+                                onClick={() => createInvite(slot, bookingNote)}
+                                disabled={isCreatingInvite}
+                              >
+                                {creatingSlot === slot.startsAt ? "Booking…" : "Send & Book →"}
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                      <button
-                        className="slot-book-btn"
-                        type="button"
-                        onClick={() => createInvite(slot)}
-                        disabled={isCreatingInvite}
-                      >
-                        {creatingSlot === slot.startsAt ? "Booking…" : "Book →"}
-                      </button>
-                    </div>
-                  ))
+                    );
+                  })
+                )}
+                {slotFeedback && (
+                  <p className={`slot-feedback slot-feedback-${slotFeedback.type}`}>
+                    {slotFeedback.text}
+                  </p>
                 )}
               </div>
             </div>
@@ -942,6 +1040,90 @@ export default function Dashboard() {
         </section>
       </div>
 
+      {isOverlayMounted && isComposeOpen ? createPortal(
+        <>
+          <button
+            className="chat-float-backdrop open"
+            type="button"
+            aria-label="Close compose"
+            onClick={() => setIsComposeOpen(false)}
+          />
+          <div className="compose-panel">
+            <div className="panel-head">
+              <div>
+                <h2 className="panel-title">Compose Email</h2>
+                <p className="panel-kicker">Sent from your Google account</p>
+              </div>
+              <button
+                className="btn-ghost chat-close-btn"
+                type="button"
+                onClick={() => setIsComposeOpen(false)}
+                aria-label="Close compose"
+              >
+                ×
+              </button>
+            </div>
+            <div className="compose-fields">
+              <div className="planner-field-group">
+                <label className="planner-label">To</label>
+                <input
+                  className="planner-input"
+                  type="email"
+                  value={emailTo}
+                  onChange={e => setEmailTo(e.target.value)}
+                  placeholder="recipient@example.com"
+                  disabled={isSendingEmail}
+                />
+              </div>
+              <div className="planner-field-group">
+                <label className="planner-label">Subject</label>
+                <input
+                  className="planner-input"
+                  value={emailSubject}
+                  onChange={e => setEmailSubject(e.target.value)}
+                  placeholder="Email subject"
+                  disabled={isSendingEmail}
+                />
+              </div>
+              <div className="planner-field-group">
+                <label className="planner-label">Message</label>
+                <textarea
+                  className="compose-body"
+                  value={emailBody}
+                  onChange={e => setEmailBody(e.target.value)}
+                  placeholder="Write your email here..."
+                  rows={10}
+                  disabled={isSendingEmail}
+                />
+              </div>
+            </div>
+            {emailFeedback && (
+              <p className={`slot-feedback slot-feedback-${emailFeedback.type}`}>
+                {emailFeedback.text}
+              </p>
+            )}
+            <div className="compose-actions">
+              <button
+                className="btn-ghost"
+                type="button"
+                onClick={() => setIsComposeOpen(false)}
+              >
+                Discard
+              </button>
+              <button
+                className="btn-primary"
+                type="button"
+                onClick={sendEmail}
+                disabled={isSendingEmail || !emailTo.trim() || !emailSubject.trim() || !emailBody.trim()}
+              >
+                {isSendingEmail ? "Sending…" : "Send"}
+              </button>
+            </div>
+          </div>
+        </>,
+        document.body,
+      ) : null}
+
       {isOverlayMounted ? createPortal(
         <>
           <button
@@ -980,49 +1162,62 @@ export default function Dashboard() {
         </div>
 
         <div className="chat-body">
-          {messages.map((msg, i) => (
+          {messages.map((msg, i) => {
+            const isStreaming = isChatting && i === messages.length - 1 && msg.role === "assistant" && msg.content === "";
+            return (
             <div className={`chat-bubble ${msg.role}`} key={i}>
+              {isStreaming ? (
+                <div className="thinking-dots"><span /><span /><span /></div>
+              ) : (
+              <>
               {msg.role === "assistant" && (
                 <div style={{ marginBottom: "0.375rem" }}>
                   <span className="chat-assistant-icon">CA</span>
                 </div>
               )}
               <div className="chat-rich-text">
-                {msg.content.split("\n").map((line, idx) => {
-                  const trimmed = line.trim();
-                  if (!trimmed) return <div className="chat-line-gap" key={`g-${idx}`} />;
-                  if (trimmed.startsWith("#")) {
-                    return <p className="chat-headline" key={`h-${idx}`}>{renderInline(trimmed.replace(/^#+\s*/, ""))}</p>;
-                  }
-                  if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
-                    return <p className="chat-list-item" key={`l-${idx}`}>• {renderInline(trimmed.slice(2))}</p>;
-                  }
-                  return <p className="chat-paragraph" key={`p-${idx}`}>{renderInline(line)}</p>;
-                })}
+                {parseMessageParts(msg.content).map((part, partIdx) =>
+                  part.kind === "text" ? (
+                    <div key={partIdx}>
+                      {part.content.split("\n").map((line, idx) => {
+                        const trimmed = line.trim();
+                        if (!trimmed) return <div className="chat-line-gap" key={`g-${idx}`} />;
+                        if (trimmed.startsWith("#")) {
+                          return <p className="chat-headline" key={`h-${idx}`}>{renderInline(trimmed.replace(/^#+\s*/, ""))}</p>;
+                        }
+                        if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+                          return <p className="chat-list-item" key={`l-${idx}`}>• {renderInline(trimmed.slice(2))}</p>;
+                        }
+                        return <p className="chat-paragraph" key={`p-${idx}`}>{renderInline(line)}</p>;
+                      })}
+                    </div>
+                  ) : (
+                    <EmailDraftCard
+                      key={partIdx}
+                      to={part.to}
+                      subject={part.subject}
+                      body={part.body}
+                      onOpenCompose={(to, subject, body) => {
+                        setEmailTo(to);
+                        setEmailSubject(subject);
+                        setEmailBody(body);
+                        setEmailFeedback(null);
+                        setIsComposeOpen(true);
+                      }}
+                    />
+                  )
+                )}
               </div>
-              {msg.role === "assistant" && (
+              {msg.role === "assistant" && msg.content && (
                 <div className="chat-msg-actions">
                   <button className="btn-ghost" type="button" onClick={() => copyMessage(msg.content)}>Copy</button>
-                  <button className="btn-ghost" type="button" onClick={() => sendAsEmail(msg.content)}>Open email</button>
-                  <button
-                    className="btn-ghost"
-                    type="button"
-                    onClick={() => createInviteFromEmail(msg.content)}
-                    disabled={isCreatingEmailInvite}
-                  >
-                    {isCreatingEmailInvite ? "Sending..." : "Send invite"}
-                  </button>
                 </div>
               )}
+              </>
+              )}
             </div>
-          ))}
-          {isChatting && (
-            <div className="chat-bubble assistant chat-thinking">
-              <div className="thinking-dots">
-                <span /><span /><span />
-              </div>
-            </div>
-          )}
+            );
+          })}
           <div ref={chatEndRef} />
         </div>
 

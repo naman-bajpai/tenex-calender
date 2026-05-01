@@ -25,6 +25,7 @@ export async function GET(request: Request) {
     .select("id, google_event_id, title, description, location, attendee_emails, organizer_email, starts_at, ends_at, status, html_link, updated_at")
     .eq("user_id", user.id)
     .gte("starts_at", from.toISOString())
+    .or("status.is.null,status.neq.cancelled")
     .order("starts_at", { ascending: true })
     .limit(300);
 
@@ -34,4 +35,3 @@ export async function GET(request: Request) {
 
   return Response.json({ events: data ?? [] });
 }
-

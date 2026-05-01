@@ -46,7 +46,7 @@ export default function LandingPage() {
         // Return to the landing page first so the client can
         // establish session state before pushing to /dashboard.
         redirectTo: window.location.origin,
-        scopes: "openid email profile https://www.googleapis.com/auth/calendar.events",
+        scopes: "openid email profile https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/gmail.send",
         queryParams: { access_type: "offline", prompt: "consent" },
       },
     });
